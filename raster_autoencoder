@@ -1,0 +1,150 @@
+import tensorflow as tf
+import numpy as np
+import csv
+import time
+import matplotlib.pyplot as plt
+
+# Get data features
+
+
+filename = 'lc_100x100_example.csv'
+checkpointfile = 'C:/Data/lc_100x100_checkpoint.ckpt'
+
+with open(filename, newline='') as f:
+    reader = csv.reader(f)
+    nrow = sum(1 for row in reader)
+
+# Parameters
+learning_rate = 0.001
+batch_size = 200
+epoch = 2000
+restore = 0
+saveterm = 10
+
+# Network Parameters
+n_hidden_1 = 200 # 1st layer number of features
+n_hidden_2 = 50 # 2nd layer number of features
+n_hidden_3 = 10 # 3rd layer number of features
+sampleh = 100
+samplew = 100
+n_input = sampleh*samplew  # 10,000(100*100) inputs
+n_classes = n_input  # 10,000 lables, which is the same as input
+
+
+def read_my_file_format(filename_queue):
+    reader = tf.TextLineReader()
+    _, value = reader.read(filename_queue)
+    record_defaults = [[0.01]]*(n_input+n_classes)
+    varlist = tf.decode_csv(value, record_defaults=record_defaults)
+    features = tf.stack(varlist[0:n_input])
+    label = features # inputs are identical to lables for testing purpose
+#    label = tf.stack(varlist[n_input:(n_input+n_classes)]) # in real data, lables have some differences compared to inputs, but have the same size
+    return features, label
+
+
+def input_pipeline(filename, batch_size, num_epochs=None, shuffle=True):
+    min_after_dequeue = 2000
+    capacity = min_after_dequeue + 3 * batch_size
+    filename_queue = tf.train.string_input_producer([filename], num_epochs=num_epochs, shuffle=shuffle)
+    example, label = read_my_file_format(filename_queue)
+    example_batch, label_batch = tf.train.shuffle_batch([example, label],
+                                                        batch_size=batch_size, capacity=capacity,
+                                                        allow_smaller_final_batch=True,
+                                                        min_after_dequeue=min_after_dequeue)
+    return example_batch, label_batch
+
+
+
+# tf Graph input
+x = tf.placeholder(tf.float32, [None, n_input])
+y = tf.placeholder(tf.float32, [None, n_classes])
+keep_prob = tf.placeholder(tf.float32)
+examples, labels = input_pipeline(filename, batch_size, epoch, True)
+
+
+# Create model
+def encoder(x, weights, biases):
+    # Hidden layer with RELU activation
+    layer_1 = tf.nn.relu(tf.add(tf.matmul(x, weights['h1']), biases['b1']))
+    layer_1d = tf.nn.dropout(layer_1, keep_prob)
+    layer_2 = tf.nn.relu(tf.add(tf.matmul(layer_1d, weights['h2']), biases['b2']))
+    layer_2d = tf.nn.dropout(layer_2, keep_prob)
+    layer_enc = tf.nn.relu(tf.add(tf.matmul(layer_2d, weights['h3']), biases['b3']))
+    return layer_enc
+
+def decoder(x, weights, biases):
+    # Hidden layer with RELU activation
+    layer_1 = tf.nn.relu(tf.add(tf.matmul(x, weights['h4']), biases['b4']))
+    layer_1d = tf.nn.dropout(layer_1, keep_prob)
+    layer_2 = tf.nn.relu(tf.add(tf.matmul(layer_1d, weights['h5']), biases['b5']))
+    layer_2d = tf.nn.dropout(layer_2, keep_prob)
+    layer_dec = tf.nn.relu(tf.add(tf.matmul(layer_2d, weights['out']), biases['out']))
+    return layer_dec
+
+# Store layers weight & bias
+initializer = tf.contrib.layers.xavier_initializer()
+weights = {
+    'h1': tf.Variable(initializer(shape=[n_input, n_hidden_1]), name='encode_h1'),
+    'h2': tf.Variable(initializer(shape=[n_hidden_1, n_hidden_2]), name='encode_h2'),
+    'h3': tf.Variable(initializer(shape=[n_hidden_2, n_hidden_3]), name='encode_h3'),
+    'h4': tf.Variable(initializer(shape=[n_hidden_3, n_hidden_2]), name='decode_h1'),
+    'h5': tf.Variable(initializer(shape=[n_hidden_2, n_hidden_1]), name='decode_h2'),
+    'out': tf.Variable(initializer(shape=[n_hidden_1, n_classes]), name='decode_out')
+}
+biases = {
+    'b1': tf.Variable(tf.random_normal([n_hidden_1]), name='encode_b1'),
+    'b2': tf.Variable(tf.random_normal([n_hidden_2]), name='encode_b2'),
+    'b3': tf.Variable(tf.random_normal([n_hidden_3]), name='encode_b3'),
+    'b4': tf.Variable(tf.random_normal([n_hidden_2]), name='decode_b1'),
+    'b5': tf.Variable(tf.random_normal([n_hidden_1]), name='decode_b2'),
+    'out': tf.Variable(tf.random_normal([n_classes]), name='decode_out')
+}
+
+# Construct model
+encoder_op = encoder(x, weights, biases)
+decoder_op = decoder(encoder_op, weights, biases)
+y_pred = decoder_op
+
+# Define loss and optimizer
+cost = tf.reduce_mean(tf.pow(y - y_pred, 2))
+optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
+
+# Initializing the variables
+saver = tf.train.Saver()
+sess = tf.Session()
+
+if restore == 0:
+    init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+elif restore == 1:
+    init = tf.local_variables_initializer()
+    saver.restore(sess, checkpointfile)
+
+sess.run(init)
+coord = tf.train.Coordinator()
+threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+
+try:
+    batch_cum = 0
+    epoch_iter = 1
+    while not coord.should_stop():
+        start_t = time.time()
+        example_batch, label_batch = sess.run([examples, labels])
+        _, c = sess.run([optimizer, cost], feed_dict={x: example_batch, y: label_batch, keep_prob: 1.0})
+        batch_cum += batch_size
+        if batch_cum >= nrow:
+            batch_cum = 0
+            epoch_iter += 1
+            if epoch_iter%saveterm == 0:
+                save_path = saver.save(sess, checkpointfile)
+        batchprint = batch_cum
+        if batch_cum == 0:
+            batchprint = nrow
+        proc_time = time.time() - start_t
+        print("Epoch: %d  %d/%d   Batch cost: %s   Processing time: %s second" % (epoch_iter, batchprint, nrow, format(c, ".6f"), format(proc_time, ".4f")))
+except tf.errors.OutOfRangeError:
+        print('Done training -- epoch limit reached')
+
+coord.request_stop()
+coord.join(threads)
+
+sess.close()
